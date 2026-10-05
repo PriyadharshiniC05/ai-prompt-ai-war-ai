@@ -1,0 +1,33 @@
+# Render Blueprint - Render reads this file when you choose "New > Blueprint" and pick your GitHub repo.
+services:
+  - type: web
+    name: ai-prompt-war
+    runtime: node
+    plan: starter            # a persistent disk needs a paid plan; free plan loses all data on restart/sleep
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: true         # every git push redeploys
+    disk:
+      name: apw-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATA_FILE
+        value: /var/data/db.json
+      - key: GEMINI_API_KEY
+        sync: false          # you type the real value in the Render dashboard (never commit it)
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: HOST_USERNAME
+        value: host
+      - key: HOST_PASSWORD
+        sync: false          # choose a strong password in the dashboard
+      - key: RESEND_API_KEY
+        sync: false          # real email sending for participant websites (or set SMTP_HOST/SMTP_USER/SMTP_PASS)
+      - key: MAIL_FROM
+        sync: false
+      - key: MAIL_NOTIFY
+        sync: false
