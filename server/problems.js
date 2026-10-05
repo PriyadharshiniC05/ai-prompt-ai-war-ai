@@ -148,7 +148,7 @@ for (const t of TYPES) for (const [title, what, goal, fa, fb] of t.items) {
     type: t.type,
     title,
     scenario,
-    problem: `Build a polished, responsive website for ${what} that helps ${goal}.`,   // Round 1 = problem statement + features only (the scenario is revealed from Round 2)
+    problem: `Build a polished, responsive website for ${what} that helps ${goal}. ${scenario}`,
     features: ['Responsive navigation', 'Hero section', ...t.common, fa, fb],
   });
 }

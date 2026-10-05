@@ -1,9 +1,9 @@
 require('dotenv').config();
 const express = require('express'), path = require('path'), crypto = require('crypto');
+const mail = require('./mail'), relay = require('../public/js/site-relay.js');
 const db = require('./db'), { scoreAllRounds } = require('./scoring'), { generate } = require('./gemini');
 const { PROBLEMS } = require('./problems'), quiz = require('./quiz'), { rewardPrompt } = require('./rewards');
 db.load();
-const PromptCheck = require('../public/js/promptcheck.js');
 const D = () => db.get();
 
 const EVENT_MS = (Number(process.env.EVENT_MINUTES) || 45) * 60000;
@@ -11,7 +11,6 @@ const RELEASE_MS = (Number(process.env.RELEASE_SECONDS) || 60) * 1000;
 const MAX = 5;
 const PROMPT_MIN = Math.max(1, Number(process.env.PROMPT_MIN) || 1); // prompt must contain at least one non-space character
 const PROMPT_MAX = Number(process.env.PROMPT_MAX) || 2000;
-const COPY_COUNTS_AS_WARNING = process.env.COPY_WARNING !== '0';   // retyping the problem statement / scenario word for word = a participant violation (set COPY_WARNING=0 to only block it)
 const MAX_WARNINGS = 2;                                          // 1st & 2nd violation = warning, 3rd = auto-submit + elimination
 const ROUNDS={1:{name:'PROBLEM STATEMENT',min:8},2:{name:'EASY ENHANCEMENT',min:8},3:{name:'MEDIUM ENHANCEMENT',min:10},4:{name:'HARD ENHANCEMENT',min:12}};
 const ENHANCEMENTS={
@@ -83,20 +82,10 @@ const assignmentFor=id=>PROBLEMS[(Number(id||1)-1)%PROBLEMS.length];
 // 20 enhancements per round. For participants 1-100 the (Round 2, Round 3) pair is unique, and neighbours never share one.
 const enhancementFor=(id,round)=>{const n=Math.max(0,Number(id||1)-1),q=Math.floor(n/20),r2=n%20,L=ENHANCEMENTS[round];
   const idx=round===2?r2:round===3?(r2+3*q+5)%20:(7*r2+5*q+2)%20;return L[idx%L.length];};
-const taskFor=s=>{const b=s.problem_statement;if(s.round===1)return `PROBLEM STATEMENT: ${b.problem}\n\nREQUIRED FEATURES:\n• ${b.features.join('\n• ')}`;return `CONTINUE THE SAME WEBSITE — DO NOT START A NEW PROBLEM.\n\nORIGINAL PROBLEM: ${b.problem}\n\nSCENARIO (new from Round 2): ${b.scenario}\n\nROUND ${s.round} ENHANCEMENT: ${s.enhancements[s.round]}\n\nKeep every working feature from earlier rounds and add/improve the requested functionality.`};
-
-// One-time repair on start-up: re-score stored submissions so rounds that never produced a website carry no marks.
-(function rescoreStored() {
-  let ch = false;
-  for (const x of D().submissions) {
-    const s = D().sessions.find(q => q.id === x.session_id); if (!s) continue;
-    const r = scoreAllRounds({ websites: s.websites, roundPrompts: s.round_prompts, enhancements: s.enhancements });
-    if (r.total !== x.score || JSON.stringify(r.rounds) !== JSON.stringify(x.breakdown)) { x.score = r.total; x.breakdown = r.rounds; if (s.submission_id === x.submission_id) { s.score = r.total; s.breakdown = r.rounds; } ch = true; }
-  }
-  if (ch) db.save();
-})();
+const taskFor=s=>{const b=s.problem_statement;if(s.round===1)return `PROBLEM STATEMENT: ${b.problem}\n\n${b.scenario}\n\nREQUIRED FEATURES:\n• ${b.features.join('\n• ')}`;return `CONTINUE THE SAME WEBSITE — DO NOT START A NEW PROBLEM.\n\nORIGINAL PROBLEM: ${b.problem}\n\n${b.scenario}\n\nROUND ${s.round} ENHANCEMENT: ${s.enhancements[s.round]}\n\nKeep every working feature from earlier rounds and add/improve the requested functionality.`};
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '100kb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 const page = f => (q, r) => r.sendFile(path.join(__dirname, '..', 'public', f));
@@ -105,6 +94,33 @@ app.get('/host', page('host.html'));
 // Friendly route used after participant login.
 app.get('/instructions', page('instructions.html'));
 app.get('/instructions.html', page('instructions.html'));
+
+
+// ---- Real-time form / email sending for the generated websites (preview iframe + downloaded file) ----
+const formHits = new Map();
+const cors = (req, res, next) => { res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' }); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); };
+app.use('/api/forms/submit', cors);
+app.post('/api/forms/submit', async (req, res) => {
+  const ip = req.ip, n = Date.now(), hits = (formHits.get(ip) || []).filter(t => n - t < 60000);
+  if (hits.length >= 20) return fail(res, 429, 'Too many submissions. Please wait a minute.');
+  hits.push(n); formHits.set(ip, hits);
+  const b = req.body || {}, fields = {};
+  for (const [k, v] of Object.entries(b.fields && typeof b.fields === 'object' ? b.fields : {})) if (typeof v === 'string' && v.trim()) fields[String(k).slice(0, 60)] = v.slice(0, 2000);
+  if (!Object.keys(fields).length) return fail(res, 400, 'Nothing to send.');
+  const emailKey = Object.keys(fields).find(k => /e-?mail/i.test(k) && mail.EMAIL_RE.test(fields[k].trim())) || Object.keys(fields).find(k => mail.EMAIL_RE.test(fields[k].trim()));
+  const email = emailKey ? fields[emailKey].trim() : '';
+  const bad = Object.keys(fields).find(k => /e-?mail/i.test(k) && !mail.EMAIL_RE.test(fields[k].trim()));
+  if (bad) return fail(res, 400, 'Please enter a valid email address.');
+  D().form_entries ||= [];
+  const entry = { at: n, site: String(b.site || '').slice(0, 60), page: String(b.page || '').slice(0, 120), fields, email, delivered: [] };
+  D().form_entries.push(entry); if (D().form_entries.length > 2000) D().form_entries.shift();
+  try {
+    if (!mail.mailConfigured()) { db.save(); return fail(res, 503, 'Email is not configured on the server. Your entry was saved but no email was sent.'); }
+    entry.delivered = await mail.sendFormMail({ site: entry.site, page: entry.page, fields, email });
+    db.save();
+    res.json({ success: true, message: email ? 'Sent! A confirmation email is on its way to ' + email + '.' : 'Sent!', delivered: entry.delivered });
+  } catch (e) { console.error('mail error', e.message); db.save(); fail(res, 502, 'Could not send the email right now. Please try again.'); }
+});
 
 const hostTokens = new Set(), busy = new Set();
 const rand = () => crypto.randomBytes(24).toString('hex');
@@ -116,23 +132,11 @@ function sweep() {
   const n = Date.now(); let ch = false;
   for (const s of D().sessions) {
     if (s.status === 'active' && n >= s.expires_at) { s.status = 'expired'; ch = true; }
-    else if (s.status === 'active' && s.proctor_started) {
-      // Round time is up: move on automatically (Round 4 has no next round, so it auto-submits what exists).
-      const end = s.round_started_at + ROUNDS[s.round].min * 60000;
-      if (n >= end) { if (s.round < 4) advanceRound(s, end, true); else finalize(s, { reason: 'Round 4 time completed' }); ch = true; }
-    }
     if (s.status === 'submitted' && n >= s.release_at) { s.status = 'released'; ch = true; }
   }
   if (ch) db.save();
 }
 setInterval(() => { try { sweep(); } catch (e) { console.error(e); } }, 1000);
-function advanceRound(s, startedAt = Date.now(), auto = false) {
-  const from = s.round;
-  s.round++; s.round_started_at = startedAt;
-  // Round 3 starts first; the quiz appears immediately on the Round 3 screen. The reward prompt unlocks only after passing it.
-  if (s.round === 3) { s.round_prompts[3] = ''; s.reward_prompt = ''; }
-  if (auto) s.auto_moved = { from, to: s.round, at: Date.now() };
-}
 const inUse = u => D().sessions.some(s => s.username === u && (s.status === 'active' || s.status === 'submitted'));
 
 function auth(req, res, next) {
@@ -166,13 +170,10 @@ function quizView(s, round) {
 // quiz is finished once passed, or once both attempts are used (so nobody is ever locked out of Round 3)
 const quizDone = s => ['passed', 'failed'].includes(quizView(s, 3).status);
 
-// What the participant's prompt must contain this round, and what it must NOT copy.
-//  Round 1   : required features. Round 2-4: the round enhancement.  Always: colour scheme + how the site solves the problem.
-//  forbid    : the problem statement (and, from Round 2, the scenario) must not be retyped word for word = participant violation.
+// What the participant's prompt must contain this round (Round 1: statement + features; Rounds 2-4: statement + enhancement).
 function rulesFor(s, round = s.round) {
-  const b = s.problem_statement, r = { forbid: { problem: b.problem } };
-  if (round === 1) r.features = b.features;
-  else { r.forbid.scenario = b.scenario; r.enhancement = s.enhancements[round]; }
+  const b = s.problem_statement, r = { problem: b.problem, scenario: b.scenario };
+  if (round === 1) r.features = b.features; else r.enhancement = s.enhancements[round];
   if (round === 3 && s.quiz?.[3]?.passed) r.reward = rewardPrompt(b, 3, s.enhancements[3]);
   return r;
 }
@@ -192,7 +193,6 @@ function state(s) {
   const R=ROUNDS[s.round];
   const quizRound = (s.round === 2 || s.round === 3) ? 3 : s.round;
   return {
-    prompt_rules:rulesFor(s), auto_moved:s.auto_moved||null,
     now:Date.now(), username:s.username.toUpperCase(), status:s.status, started_at:s.started_at, expires_at:s.expires_at,
     max:MAX, attempts_left:MAX-s.attempts_used, round:s.round, round_name:R.name, round_minutes:R.min, round_started_at:s.round_started_at,
     problem_statement:s.problem_statement, task:taskFor(s),
@@ -236,7 +236,13 @@ app.post('/api/round/next', auth, active, (req, res) => {
   const s = req.s;
   if (s.round >= 4) return fail(res, 400, 'Already in the final round.');
   if (!s.websites[s.round]) return fail(res, 400, 'Generate and review your website before moving to the next round.');
-  advanceRound(s);
+  s.round++; s.round_started_at = Date.now();
+  // Round 3 starts first; the quiz now appears immediately on the Round 3 screen.
+  // The solved reward prompt is unlocked only after the participant passes it.
+  if (s.round === 3) {
+    s.round_prompts[3] = '';
+    s.reward_prompt = '';
+  }
   db.save();
   res.json({ success: true, state: state(s) });
 });
@@ -266,18 +272,12 @@ app.post('/api/generate', auth, active, async (req, res) => {
     if (prompt.length < PROMPT_MIN || prompt.length > PROMPT_MAX) return fail(res, 400, `Prompt must contain 1 to ${PROMPT_MAX} characters (yours: ${prompt.length}).`);
     if (round !== s.round) return fail(res, 400, 'Round mismatch. Refresh the page.');
     if (round === 3 && !quizDone(s)) return fail(res, 403, 'Pass the Round 3 quiz before generating the Round 3 website.', { code: 'QUIZ_REQUIRED' });
-    const chk = PromptCheck.check(prompt, rulesFor(s, round));
-    if (chk.violated) {                                                                                   // retyped problem statement / scenario
-      if (COPY_COUNTS_AS_WARNING) recordViolation(s, 'copy_prompt');
-      return fail(res, 422, PromptCheck.violationMessage(chk.violations), { code: 'PROMPT_VIOLATION', state: state(s) });   // attempt NOT consumed
-    }
-    if (!chk.ok) return fail(res, 422, PromptCheck.message(chk.missing), { code: 'PROMPT_RULES', missing: chk.missing });   // attempt NOT consumed
     if (s.attempts_used >= MAX) return fail(res, 403, 'PROMPT LIMIT REACHED', { code: 'LIMIT' });
     if (busy.has(s.id)) return fail(res, 429, 'A generation is already in progress.');
     busy.add(s.id);
     try {
       const previous = round > 1 ? (s.websites[round - 1] || s.latest_html) : '';
-      const r = await generate(prompt, { round, previous, task: taskFor(s), problem: s.problem_statement });
+      const r = await generate(prompt, { round, previous });
       if (!r.ok) return fail(res, 502, r.message);                 // API failure: attempt NOT consumed
       sweep();
       if (s.status !== 'active') return fail(res, 403, 'EVENT TIME COMPLETED', { code: s.status });
@@ -294,7 +294,7 @@ function finalize(s, { eliminated = false, reason = '' } = {}) {
   const d = new Date(), ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   const prefix = `SUB-${ymd}-${s.username.toUpperCase()}-`;
   const submissionId = prefix + String(D().submissions.filter(x => x.submission_id.startsWith(prefix)).length + 1).padStart(3, '0');
-  const result = scoreAllRounds({ websites: s.websites, roundPrompts: s.round_prompts, enhancements: s.enhancements });
+  const result = scoreAllRounds({ websites: s.websites, roundPrompts: s.round_prompts, enhancements: s.enhancements, problem: s.problem_statement });
   D().submissions.push({ id: D().submissions.length + 1, submission_id: submissionId, participant_username: s.username, session_id: s.id, score: result.total, breakdown: result.rounds, submitted_at: Date.now(), prompts: s.prompts, eliminated, eliminated_reason: reason, violations: s.violations || [], website_data: { final: s.latest_html, rounds: s.websites } });
   Object.assign(s, { status: eliminated ? 'eliminated' : 'submitted', submission_id: submissionId, score: result.total, breakdown: result.rounds, release_at: eliminated ? null : Date.now() + RELEASE_MS });
   if (eliminated) { const p = D().participants.find(x => x.username === s.username); if (p) p.eliminated = true; }
@@ -313,27 +313,19 @@ app.post('/api/submit', auth, active, (req, res) => {
 
 // ---- Secure event mode: fullscreen / tab-switch violations -------------------------------------------------
 app.post('/api/proctor/begin', auth, active, (req, res) => {
-  const s = req.s;
-  if (!s.proctor_started) { const n = Date.now(); Object.assign(s, { started_at: n, round_started_at: n, expires_at: n + EVENT_MS }); }   // clocks start when the event really begins, not at login
-  s.proctor_started = true; db.save();
+  req.s.proctor_started = true; db.save();
   res.json({ success: true, state: state(req.s) });
 });
-function recordViolation(s, type) {
-  s.violations ||= [];
-  const n = Date.now(), last = s.violations[s.violations.length - 1];
-  if (last && n - last.at < 1500) return false;                      // one action can fire several browser events
-  s.violations.push({ type: String(type || 'unknown').slice(0, 30), at: n });
-  if (s.violations.length > MAX_WARNINGS) finalize(s, { eliminated: true, reason: 'Too many violations (left fullscreen / switched tab / copied the problem)' });
-  else db.save();
-  return true;
-}
 app.post('/api/violation', auth, active, (req, res) => {
   const s = req.s;
   if (!s.proctor_started) return res.json({ success: true, state: state(s) });
-  const type = String(req.body?.type || 'unknown');
-  if (type === 'copy_prompt') return res.json({ success: true, state: state(s) });   // only the server can raise this one (see /api/generate)
-  const fresh = recordViolation(s, type);
-  res.json({ success: true, duplicate: !fresh || undefined, state: state(s) });
+  s.violations ||= [];
+  const n = Date.now(), last = s.violations[s.violations.length - 1];
+  if (last && n - last.at < 1500) return res.json({ success: true, duplicate: true, state: state(s) });   // one action can fire several browser events
+  s.violations.push({ type: String(req.body?.type || 'unknown').slice(0, 30), at: n });
+  if (s.violations.length > MAX_WARNINGS) finalize(s, { eliminated: true, reason: 'Left fullscreen / switched tab too many times' });
+  else db.save();
+  res.json({ success: true, state: state(s) });
 });
 
 // ---- Round 3 gate quiz: 2 attempts, 5 questions, pass unlocks the solved Round 3 prompt ----
@@ -373,14 +365,14 @@ app.get('/api/download', auth, (req, res) => {
   const filename = `ai-prompt-war-${String(req.s.username).replace(/[^a-z0-9_-]/gi, '_')}-website.html`;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(req.s.latest_html);
+  res.send(relay.inject(req.s.latest_html, { base: `${req.protocol}://${req.get('host')}`, site: req.s.username }));
 });
 
 // ---- Leaderboard: rank by total score (ties broken by earlier submission); eliminated entries are listed but unranked ----
 const marksOf = bd => [1, 2, 3, 4].map(n => {
   const r = bd?.[n];
-  return (r && !r.skipped) ? { round: n, out_of_100: r.total, out_of_25: r.out_of_25 ?? r.contribution, functionality: r.functionality, uiux: r.uiux, prompt: r.promptQuality, dynamic: r.dynamic || null }
-           : { round: n, out_of_100: null, out_of_25: null, functionality: null, uiux: null, prompt: null, dynamic: null };
+  return r ? { round: n, out_of_100: r.total, out_of_25: r.out_of_25 ?? r.contribution, functionality: r.functionality, uiux: r.uiux, prompt: r.promptQuality, prompt_detail: r.promptDetail || null, colour: r.colour || null, dynamic: r.dynamic || null }
+           : { round: n, out_of_100: null, out_of_25: null, functionality: null, uiux: null, prompt: null, prompt_detail: null, colour: null, dynamic: null };
 });
 function leaderboard() {
   const subs = D().submissions;

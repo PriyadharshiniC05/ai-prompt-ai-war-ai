@@ -13,27 +13,18 @@ async function call(method, path, body) {
   let st = (await call('GET', '/api/state')).state;
   ok(st.round === 1 && st.prompt_min === 1, 'Round 1 starts and prompt minimum is removed');
 
-  const valid = st => { const q = st.prompt_rules; return [(q.features || []).join(', '), q.enhancement, 'Colour palette: cream background with brown accents.', 'The website helps visitors find what they need so that they can act quickly.'].filter(Boolean).join(' '); };   // own words: the problem statement / scenario are NOT retyped
-  r = await call('POST', '/api/generate', { round: 1, prompt: 'x' });
-  ok(!r.success && r.code === 'PROMPT_RULES' && r.missing.length >= 3, 'A prompt without features / colours / how-it-solves-the-problem is rejected');
-  ok(!/scenario/i.test(st.task), 'Round 1 shows the problem statement + features only (no scenario)');
-  r = await call('POST', '/api/generate', { round: 1, prompt: st.prompt_rules.forbid.problem + ' ' + valid(st) });
-  ok(r.code === 'PROMPT_VIOLATION' && r.state.warnings === 1 && r.state.attempts_left === 5, 'Retyping the problem statement word for word is a participant violation (no attempt used)');
-  r = await call('POST', '/api/generate', { round: 1, prompt: valid(st).replace(st.prompt_rules.features[0], 'zzz') });
-  ok(r.code === 'PROMPT_RULES', 'A missing required feature is rejected');
-  r = await call('POST', '/api/generate', { round: 1, prompt: valid(st).replace(/colou?r/gi, 'x').replace(/cream|brown/gi, 'x') });
-  ok(r.code === 'PROMPT_RULES', 'A prompt with no colour explanation is rejected');
-  st = (await call('GET', '/api/state')).state; ok(st.attempts_left === 5, 'Rejected prompts do not use an attempt');
-  const p1 = valid(st);
-  r = await call('POST', '/api/generate', { round: 1, prompt: p1.toUpperCase() });
-  ok(r.success, 'Exact statement typed in different case/spacing is accepted');
+  const own = 'I want a warm, friendly website where visitors can browse everything on offer and get in touch. The colour scheme is a cream background (#fff7ec) with dark brown text and orange accents so every line stays readable. Cards show name and price, and when a visitor hovers a card it lifts slightly. A contact form checks the name, email and message and then shows a thank you message.';
+  const valid = () => own;
+  st = (await call('GET', '/api/state')).state;
+  ok(!('prompt_rules' in st), 'No prompt-rules container is sent to the participant');
+  const p1 = own;
+  r = await call('POST', '/api/generate', { round: 1, prompt: p1 });
+  ok(r.success, 'Round 1 prompt in own words is accepted');
   st = (await call('GET', '/api/state')).state;
   ok(st.history[0].html, 'Round 1 website is stored');
 
   r = await call('POST', '/api/round/next', {}); ok(r.success && r.state.round === 2, 'Round 2 starts after Round 1 website is generated');
-  ok(/SCENARIO/.test(r.state.task), 'The scenario is revealed from Round 2');
   r = await call('POST', '/api/prompt/save', { round: 2, prompt: 'enhance' }); ok(r.success, 'Round 2 prompt is saved independently');
-  r = await call('POST', '/api/generate', { round: 2, prompt: 'enhance' }); ok(r.code === 'PROMPT_RULES', 'Round 2 needs enhancement + colours + how it solves the problem');
   st = (await call('GET', '/api/state')).state; r = await call('POST', '/api/generate', { round: 2, prompt: valid(st) }); ok(r.success, 'Round 2 generates from the previous website');
 
   r = await call('POST', '/api/round/next', {}); ok(r.success && r.state.round === 3, 'Round 3 starts; the quiz gate appears inside Round 3');
@@ -43,7 +34,12 @@ async function call(method, path, body) {
   const dbm = require('../server/db'); dbm.load(); const db = dbm.get();
   const s = db.sessions.find(x => x.token === token);
   const answers = s.quiz[3].attempts.at(-1).qs.map(q => q.ans);
-  r = await call('POST', '/api/quiz/submit', { round: 3, answers });
+  const wrong = answers.map((a, i) => i === 0 ? (a + 1) % 4 : a);
+  r = await call('POST', '/api/quiz/submit', { round: 3, answers: wrong });
+  ok(r.success && r.state.quiz.status === 'retry', 'Quiz needs ALL 5 answers right (4/5 fails)');
+  r = await call('POST', '/api/quiz/start', { round: 3 });
+  const answers2 = db.sessions ? (dbm.load(), dbm.get().sessions.find(x => x.token === token).quiz[3].attempts.at(-1).qs.map(q => q.ans)) : answers;
+  r = await call('POST', '/api/quiz/submit', { round: 3, answers: answers2 });
   ok(r.success && r.state.quiz.status === 'passed' && r.state.quiz.reward, 'Solved Round 3 quiz unlocks the reward prompt');
   ok(r.state.history[2].prompt === r.state.reward_prompt && r.state.reward_prompt.includes(r.state.problem_statement.title), 'Reward prompt is stored for Round 3');
 
@@ -52,7 +48,7 @@ async function call(method, path, body) {
 
   st = (await call('GET', '/api/state')).state;
   ok(st.history[0].html && st.history[1].html && st.history[2].html, 'Saved round previews remain available');
-  r = await call('GET', '/api/round/view/1'); ok(r.success && r.round.html && r.round.prompt === p1.toUpperCase(), 'Completed Round 1 can be opened from saved history');
+  r = await call('GET', '/api/round/view/1'); ok(r.success && r.round.html && r.round.prompt === p1, 'Completed Round 1 can be opened from saved history');
 
   // ---- Round 4, submit, dynamic scoring, host leaderboard + PDF, 100 participants ----
   st = (await call('GET', '/api/state')).state;

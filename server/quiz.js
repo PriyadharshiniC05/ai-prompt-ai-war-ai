@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const LIMIT_MS = (Number(process.env.QUIZ_SECONDS) || 60) * 1000;
 const GRACE_MS = 3000;                                       // network latency allowance
 const PER = Number(process.env.QUIZ_QUESTIONS) || 5;         // questions per attempt
-const PASS = Number(process.env.QUIZ_PASS) || 3;             // correct answers needed
+const PASS = Math.min(PER, Number(process.env.QUIZ_PASS) || PER);   // correct answers needed: ALL questions by default
 const MAX_ATTEMPTS = 2;
 
 // [question, CORRECT answer, wrong, wrong, wrong]  (options are shuffled per attempt)

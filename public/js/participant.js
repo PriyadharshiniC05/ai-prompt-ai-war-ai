@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 let S = null, off = 0, genBusy = false, shown = null, expiredRefetched = false, selectedRound = null, promptDirty = false, saveTimer = null;
 let holdWarn = false, proctoring = false, violating = false, warnPending = false, violationType = '', reloadChecked = false;
 const qz = { key: null, sent: false, ack: false };
-let stateVer = 0, lastPreviewHtml = '', lastRoundPoll = 0;
+let stateVer = 0, lastPreviewHtml = '';
 const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
 const api = async (url, method = 'GET', body) => {
@@ -19,16 +19,7 @@ const api = async (url, method = 'GET', body) => {
 const fmt = ms => { ms = Math.max(0, Math.ceil(ms / 1000)); return String(Math.floor(ms / 60)).padStart(2, '0') + ':' + String(ms % 60).padStart(2, '0'); };
 const now = () => Date.now() + off;
 const leave = u => { sessionStorage.removeItem('apw_token'); if (u) sessionStorage.setItem('apw_user', u); location.href = '/'; };
-const setState = st => {
-  const wasRound = S?.round; S = st; off = st.now - Date.now();
-  if (selectedRound === null || (wasRound !== st.round && selectedRound === wasRound)) selectedRound = st.round;
-  if (wasRound && wasRound !== st.round) {                       // round changed (button OR the round timer ran out)
-    promptDirty = false; shown = null; qz.key = null; qz.ack = false; clearTimeout(saveTimer); $('prompt').dataset.round = '';
-    const am = st.auto_moved;
-    if (am && am.to === st.round && st.now - am.at < 20000) msg(`TIME UP — Round ${am.from} ended and you were moved to Round ${am.to}.`, 'err');
-  }
-  render();
-};
+const setState = st => { const wasRound = S?.round; S = st; off = st.now - Date.now(); if (selectedRound === null || (wasRound !== st.round && selectedRound === wasRound)) selectedRound = st.round; render(); };
 
 async function refresh(force) {
   const v = stateVer;
@@ -65,13 +56,13 @@ function showPreview(html) {
 function render() {
   if (!S) return;
   if (S.status === 'released') return leave(S.username.toLowerCase());
-  $('who').textContent = S.username;
+  $('who').textContent = S.username; window.__apwSite = S.username;
   $('expired').hidden = S.status !== 'expired';
   $('done').hidden = S.status !== 'submitted';
   if (S.status === 'submitted') {
     $('subId').textContent = S.submission_id; $('subScore').textContent = Math.round(Number(S.score || 0));
     const rounds = S.breakdown || {};
-    $('scoreGrid').innerHTML = [1,2,3,4].map(i => { const r = rounds[i] || {}; if (r.skipped) return `<div class="score-round"><small>ROUND ${i} · 25%</small><b>—</b><div class="mini">Not completed · 0 marks</div></div>`; return `<div class="score-round"><small>ROUND ${i} · 25%</small><b>${Math.round(Number(r.total || 0))}/100</b><div class="mini">Prompt ${Math.round(Number(r.promptQuality || 0))} · UI/UX ${Math.round(Number(r.uiux || 0))} · Functionality ${Math.round(Number(r.functionality || 0))}</div></div>`; }).join('');
+    $('scoreGrid').innerHTML = [1,2,3,4].map(i => { const r = rounds[i] || {}; return `<div class="score-round"><small>ROUND ${i} · 25%</small><b>${Math.round(Number(r.total || 0))}/100</b><div class="mini">Prompt ${Math.round(Number(r.promptQuality || 0))} · UI/UX ${Math.round(Number(r.uiux || 0))} · Functionality ${Math.round(Number(r.functionality || 0))}</div>${r.dynamic ? `<div class=\"mini\">Changed ${r.dynamic.change_pct}% from Round ${i - 1} · kept ${r.dynamic.preserved_pct}% of it</div>` : ''}</div>`; }).join('');
   }
   if (S.status !== 'active') stopProctoring();
   $('elim').hidden = S.status !== 'eliminated';
@@ -160,19 +151,11 @@ $('gen').onclick = async () => {
   if (genBusy || !S) return;
   const prompt = $('prompt').value.trim();
   if (!prompt) return msg('Enter a prompt before generating.', 'err');
-  const chk = window.PromptCheck.check(prompt, S.prompt_rules);
-  if (!chk.violated && !chk.ok) return msg(window.PromptCheck.message(chk.missing), 'err');   // a copied problem/scenario goes to the server, which records the violation
   if (prompt.length > S.prompt_max) return msg(`Prompt too long: ${prompt.length} / ${S.prompt_max} maximum characters.`, 'err');
   genBusy = true; msg(''); render();
-  const rnd = S.round, warnedBefore = S.warnings;
-  const r = await api('/api/generate', 'POST', { prompt, round: rnd });
+  const r = await api('/api/generate', 'POST', { prompt, round: S.round });
   genBusy = false;
-  if (r.code === 'PROMPT_VIOLATION') {
-    msg(r.message, 'err');
-    if (r.state) { violationType = 'copy_prompt'; if (r.state.warnings > warnedBefore || r.state.status !== 'active') { violating = true; holdWarn = true; } setState(r.state); }
-    return;
-  }
-  if (r.success) { S.attempts_left = r.attempts_left; if (rnd === S.round) { S.html = r.html; S.has_site = true; } const h = (S.history || []).find(x => x.round === rnd); if (h) { h.prompt = prompt; h.html = r.html; h.completed = true; } promptDirty = false; await refresh(true); msg('WEBSITE GENERATED', 'ok'); }
+  if (r.success) { S.attempts_left = r.attempts_left; S.html = r.html; S.has_site = true; const h = (S.history || []).find(x => x.round === S.round); if (h) { h.prompt = prompt; h.html = r.html; h.completed = true; } promptDirty = false; await refresh(true); msg('WEBSITE GENERATED', 'ok'); }
   else if (r.code === 'expired') { await refresh(); }
   else if (r.code === 'LIMIT') { S.attempts_left = 0; msg('PROMPT LIMIT REACHED', 'err'); }
   else msg(r.message || (r.status === 502 || r.status === 500 || !r.status ? 'AI GENERATION FAILED\n\nPlease check the server console and Gemini configuration.' : 'Generation failed.'), 'err');
@@ -224,9 +207,7 @@ setInterval(() => {
   tickQuiz();
   if (S.status === 'active') {
     const left = S.expires_at - now(); $('evTime').textContent = fmt(left);
-    const rLeft = S.round_minutes * 60000 - (now() - S.round_started_at);
-    $('rTime').textContent = fmt(rLeft);
-    if (rLeft <= 0 && S.proctor_started && Date.now() - lastRoundPoll > 2500) { lastRoundPoll = Date.now(); refresh(true); }   // server auto-advances to the next round
+    $('rTime').textContent = fmt(S.round_minutes * 60000 - (now() - S.round_started_at));
     if (left <= 0 && !expiredRefetched) { expiredRefetched = true; refresh(); }
   } else if (S.status === 'submitted') {
     const left = S.release_at - now(); $('cd').textContent = fmt(left);
@@ -244,16 +225,7 @@ function updateCounter() {
   $('cbar').style.width = Math.min(100, (n / max) * 100) + '%';
   const c = $('counter'); c.classList.toggle('good', n > 0 && n < max * 0.9); c.classList.toggle('high', n >= max * 0.9);
   $('chint').textContent = n >= max ? 'Maximum length reached' : '';
-  renderRules();
   if (S) $('gen').disabled = isHistoryView() || genBusy || S.attempts_left <= 0 || S.status !== 'active' || n < 1;
-}
-function renderRules() {
-  const box = $('rulesCheck'); if (!box) return;
-  if (!S || isHistoryView() || !S.prompt_rules || quizIsGate()) { box.hidden = true; return; }
-  const c = window.PromptCheck.check($('prompt').value, S.prompt_rules);
-  box.hidden = false;
-  box.innerHTML = '<span class="rc-title">PROMPT MUST INCLUDE</span>' + c.items.map(i => `<span class="rc-chip ${i.ok ? 'ok' : 'no'}">${i.ok ? '✓' : '✗'} ${esc(i.label)}</span>`).join('') +
-    ((c.violations || []).length ? '<span class="rc-title">PARTICIPANT VIOLATION — DO NOT</span>' + c.violations.map(v => `<span class="rc-chip ${v.hit ? 'no' : 'safe'}">${v.hit ? '✗' : '•'} ${esc(v.label)}</span>`).join('') : '');
 }
 $('prompt').addEventListener('input', updateCounter);
 // participants must TYPE their prompt: pasting / dropping text into it is blocked
@@ -270,7 +242,7 @@ function openQuizGate() { $('quizCard').hidden = false; $('quizCard').classList.
 function closeQuizGate() { $('quizCard').classList.remove('quiz-gate'); $('quizCard').hidden = true; }
 function qzLeft() { const Q = S?.quiz; return Q && Q.status === 'running' ? Q.started_at + Q.limit_ms - now() : 0; }
 function qzCollect() { return (S.quiz.questions || []).map((_, i) => { const c = document.querySelector(`input[name="q${i}"]:checked`); return c ? Number(c.value) : null; }); }
-function qzCount() { const n = qzCollect().filter(v => v !== null).length; $('qzAnswered').textContent = `${n} / ${S.quiz.total} answered`; }
+function qzCount() { const n = qzCollect().filter(v => v !== null).length; $('qzAnswered').textContent = `${n} / ${S.quiz.total} answered`; if (!qz.sent) $('qzSubmit').disabled = n < S.quiz.total; }
 function renderQuiz() {
   const Q = S.quiz || { status: 'idle' }, st = Q.status, used = Q.attempts_used || 0, max = Q.attempts_max || 2;
   const secs = Math.round((Q.limit_ms || 60000) / 1000);
@@ -280,7 +252,7 @@ function renderQuiz() {
   $('qzIdle').hidden = st !== 'idle'; $('qzPlay').hidden = st !== 'running'; $('qzResult').hidden = st !== 'retry'; $('qzWon').hidden = st !== 'passed'; $('qzLost').hidden = st !== 'failed';
   $('qzStart').disabled = $('qzRetry').disabled = !show || S.status !== 'active';
   $('qzTitle').textContent = st === 'passed' ? 'Quiz passed — Round 3 reward unlocked!' : st === 'failed' ? 'No attempts left' : st === 'running' ? `Attempt ${used} of ${max} — answer all ${Q.total} questions` : 'Pass this quiz before Round 3 starts';
-  if (st === 'idle') { $('qzIntro').textContent = `${Q.total} questions · ${secs} seconds · get ${Q.pass_mark} right to pass.`; $('qzTimer').textContent = fmt(Q.limit_ms || 60000); $('qzTimer').classList.remove('hot'); }
+  if (st === 'idle') { $('qzIntro').textContent = `${Q.total} questions · ${secs} seconds · answer every question and get ${Q.pass_mark === Q.total ? 'all' : Q.pass_mark} right to pass.`; $('qzTimer').textContent = fmt(Q.limit_ms || 60000); $('qzTimer').classList.remove('hot'); }
   if (st === 'retry') { $('qzResMsg').textContent = `${Q.last_timed_out ? 'Time ran out. ' : ''}Attempt ${used}: ${Q.last_score} / ${Q.total} — you need ${Q.pass_mark}.`; $('qzTimer').textContent = '—'; $('qzTimer').classList.remove('hot'); }
   if (st === 'passed') { $('qzTimer').textContent = '✓'; $('qzTimer').classList.remove('hot'); $('qzWonMsg').textContent = `Score ${Q.last_score} / ${Q.total}. Your solved Round 3 challenge prompt is ready and will be placed into Round 3 automatically.`; if ($('reward').value !== Q.reward) $('reward').value = Q.reward || ''; $('continueRound3').textContent = 'CONTINUE TO ROUND 3'; }
   if (st === 'failed') { $('qzTimer').textContent = '✗'; $('qzTimer').classList.add('hot'); $('qzLostMsg').textContent = `${Q.last_timed_out ? 'Time ran out. ' : ''}Attempt ${used}: ${Q.last_score} / ${Q.total} — you did not unlock the Round 3 reward. You can still write your own prompt.`; }
@@ -291,7 +263,7 @@ function renderQuiz() {
       $('qzList').innerHTML = Q.questions.map((q, i) => `<fieldset class="qz-q"><legend>${i + 1}. ${esc(q.q)}</legend>` + q.opts.map((o, j) => `<label class="qz-opt"><input type="radio" name="q${i}" value="${j}"><span>${esc(o)}</span></label>`).join('') + '</fieldset>').join('');
       qzCount();
     }
-    $('qzSubmit').disabled = qz.sent;
+    $('qzSubmit').disabled = qz.sent || qzCollect().some(v => v === null);   // all questions must be answered
   }
   if (!show) closeQuizGate(); else openQuizGate();
 }
@@ -327,7 +299,7 @@ $('prompt').addEventListener('input', () => { if (!isHistoryView()) scheduleProm
 $('prompt').addEventListener('blur', savePrompt);
 
 /* ---------- secure event mode (fullscreen lock, tab-switch detection, 2 warnings, 3rd = eliminated) ---------- */
-const VLABEL = { exit_fullscreen: 'You exited fullscreen.', tab_switch: 'You switched to another tab or window.', window_blur: 'You left the event window.', reload: 'The page was reloaded or reopened.', copy_problem: 'You tried to copy the challenge problem statement, which is not allowed.', copy_prompt: 'Your prompt repeated the problem statement or scenario word for word. Write the prompt in your own words.' };
+const VLABEL = { exit_fullscreen: 'You exited fullscreen.', tab_switch: 'You switched to another tab or window.', window_blur: 'You left the event window.', reload: 'The page was reloaded or reopened.', copy_problem: 'You tried to copy the challenge problem statement, which is not allowed.' };
 async function enterFullscreen() {
   const el = document.documentElement;
   try { await (el.requestFullscreen ? el.requestFullscreen({ navigationUI: 'hide' }) : el.webkitRequestFullscreen && el.webkitRequestFullscreen()); } catch {}

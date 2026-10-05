@@ -99,7 +99,7 @@ label.qz-opt:hover{border-color:var(--cyan)}label.qz-opt:has(input:checked){bord
 /* problem statement cannot be selected / copied */
 .assignment,.assignment *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 
-.rules-check{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}.rc-title{width:100%;font-size:.62rem;letter-spacing:.14em;color:var(--mut)}.rc-chip{font-size:.7rem;padding:4px 9px;border-radius:999px;border:1px solid var(--line)}.rc-chip.ok{color:var(--ok);border-color:rgba(52,211,153,.45)}.rc-chip.no{color:var(--bad);border-color:rgba(248,113,113,.45)}.rc-chip.safe{color:var(--mut)}
+.rules-check{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}.rc-title{width:100%;font-size:.62rem;letter-spacing:.14em;color:var(--mut)}.rc-chip{font-size:.7rem;padding:4px 9px;border-radius:999px;border:1px solid var(--line)}.rc-chip.ok{color:var(--ok);border-color:rgba(52,211,153,.45)}.rc-chip.no{color:var(--bad);border-color:rgba(248,113,113,.45)}
 
 /* host leaderboard */
 .podium{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}

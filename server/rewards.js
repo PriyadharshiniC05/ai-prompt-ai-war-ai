@@ -5,7 +5,7 @@ const QUALITY = 'Design: modern colour palette defined with CSS variables, clean
 function rewardPrompt(problem, round, enhancement) {
   const feats = problem.features.join(', ');
   if (round === 1) {
-    return `You are an expert front-end developer. Build a complete, responsive, single-file website called "${problem.title}". ${problem.problem} Include these sections and features: ${feats}. ${QUALITY}`;
+    return `You are an expert front-end developer. Build a complete, responsive, single-file website called "${problem.title}". ${problem.problem} ${problem.scenario || ''} Include these sections and features: ${feats}. ${QUALITY}`;
   }
   return `You are an expert front-end developer. Continue the SAME "${problem.title}" website from the previous round without changing its concept. ${problem.scenario || ''} ${enhancement} Keep every earlier section and feature working, keep the same visual identity, and return the full updated page. ${QUALITY}`;
 }

@@ -113,6 +113,7 @@ function preparePreviewHtml(html) {
   html = String(html).replace(/<meta[^>]+http-equiv=[\"']?Content-Security-Policy[\"']?[^>]*>/gi, '');
   html = html.replace(/<meta[^>]+content=[\"'][^\"']*(?:script-src|default-src)[^\"']*[\"'][^>]*>/gi, '');
   var tag = '<script>(' + frameShim.toString() + ')();<' + '/script>';
+  if (window.siteRelay) html = window.siteRelay.inject(html, { base: location.origin, site: window.__apwSite || '' });
   var m;
   if ((m = /<head(?=[\s>])[^>]*>/i.exec(html))) return html.slice(0, m.index + m[0].length) + tag + html.slice(m.index + m[0].length);
   if ((m = /<html[^>]*>/i.exec(html))) return html.slice(0, m.index + m[0].length) + '<head>' + tag + '</head>' + html.slice(m.index + m[0].length);

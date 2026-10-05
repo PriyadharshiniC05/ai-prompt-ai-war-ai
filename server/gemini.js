@@ -1,5 +1,6 @@
 // Gemini call with timeout + limited retries. Returns {ok, html} or {ok:false, message}. Never throws.
-const SYS = `You are an expert front-end engineer competing in a four-round website-building competition. Return ONE complete, self-contained HTML document with inline CSS in <style> and inline JavaScript in <script>. No external files, external stylesheets, external scripts, or image URLs. The website must work inside a sandboxed iframe. Navigation MUST use same-page section IDs and hash links; never create links to nonexistent .html pages. Buttons, forms, filters, menus, modals and other requested features must have real client-side behavior. For enhancement rounds, preserve the existing website's original problem, content, visual identity and working features, then extend and improve it; DO NOT replace it with a new problem or unrelated design. Make the requested functionality actually usable. Use responsive design, accessible labels/focus states, and clear success/error feedback. Output ONLY raw HTML.`;
+// Deliberately minimal: the model only gets technical output rules. It must build what the participant typed - nothing more.
+const SYS = `You turn the user's prompt into a website. Return ONE complete HTML document with inline CSS in <style> and inline JavaScript in <script>; no external files, libraries, fonts or image URLs. Build EXACTLY what the prompt says and nothing else: do not add features, sections, pages, animations, colours, content, copy or polish that the prompt does not mention, and do not "improve" or fill gaps with your own ideas. If the prompt is vague or short, output a correspondingly plain, literal result. If a CURRENT WEBSITE is supplied, change only what the new prompt asks for and keep every other part of it exactly as it is. Output ONLY raw HTML.`;
 const FAIL = 'AI generation is temporarily unavailable.';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -11,7 +12,7 @@ function clean(t) {
   return /<\w+/.test(t) && t.length > 40 ? t : '';
 }
 
-async function generate(prompt, { round, previous, task, problem }) {
+async function generate(prompt, { round, previous }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key || key === 'your_key_here') {
     if (process.env.MOCK_AI === '1') {
@@ -23,15 +24,9 @@ async function generate(prompt, { round, previous, task, problem }) {
   }
   const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  let text = `ROUND ${round}
-ASSIGNED PROBLEM: ${problem?.title || ''} — ${problem?.problem || ''}
-ROUND REQUIREMENT:
-${task || ''}
-
-PARTICIPANT PROMPT:
-${prompt}`;
-  if (previous) text += `\n\nTHIS IS AN ENHANCEMENT ROUND. Here is the participant's current website. Preserve its original problem, content and identity. Extend it according to the round requirement and participant prompt. Return the FULL updated document, not a partial patch:\n${String(previous).slice(0, 60000)}`;
-  const body = JSON.stringify({ systemInstruction: { parts: [{ text: SYS }] }, contents: [{ role: 'user', parts: [{ text }] }], generationConfig: { temperature: 0.8, maxOutputTokens: 16384 } });
+  let text = `PROMPT:\n${prompt}`;
+  if (previous) text += `\n\nCURRENT WEBSITE (apply the prompt to this page and return the full updated document):\n${String(previous).slice(0, 60000)}`;
+  const body = JSON.stringify({ systemInstruction: { parts: [{ text: SYS }] }, contents: [{ role: 'user', parts: [{ text }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 16384 } });
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 60000);
